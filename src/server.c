@@ -22,7 +22,7 @@ void send_tcp_response(unsigned int, tcp_server_response);
 void handle_http_get_request(int);
 int insert_client_into_db(struct sockaddr_in, char *,  uint16_t);
 void update_client_db_info(int, int);
-void list_all_clients_from_db();
+void list_all_clients_from_db(char *);
 void ctrl_c_handler();
 
 int main()
@@ -212,7 +212,18 @@ void handle_http_get_request(int desc_idx)
     unsigned int bytes_sent = 0;
     char res_head[HTTP_HEADER_LEN], res_msg[HTTP_MESSAGE_LEN];
 
-    sprintf(res_msg, "<H1>HELLO WORLD</H1>\n");
+    sprintf(res_msg, 
+        "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\"><title>Rock - Paper - Scissor</title>" \
+        "<style>html, .body { font-family: arial, sans-serif; } .container { display: flex; flex-direction: column }"\
+        "table { border-collapse: collapse; width: 70%; } td, th { border: 1px solid #dddddd; text-align: left; padding: 8px; }"\
+        "tr:nth-child(even) { background-color: #dddddd; } </style> </head> <body> <div class=\"container\"> <div class=\"item\">"\
+        "<h3>Rock - Paper - Scissor clients history</h3> </div> <div class=\"item\"><table><thead><tr>"\
+        "<th>Player nickname</th><th>Player IP address</th><th>Player TCP port</th><th>Player UDP port</th>"\
+        "<th>Opponent nickname</th><th>Opponent IP address</th><th>Opponent TCP port</th><th>Opponent UDP port</th><th>Updated at</th></tr></thead><tbody>"
+    );
+    list_all_clients_from_db(res_msg);
+    sprintf(&res_msg[strlen(res_msg)], "</tbody></table></div></div></body></html>");
+
     sprintf(res_head, "HTTP/1.1 200 OK\r\n");
     sprintf(&res_head[strlen(res_head)], "Content-Type: text/html; charset=utf-8\r\n");
     sprintf(&res_head[strlen(res_head)], "Content-Length: %d\r\n", strlen(res_msg));
@@ -222,7 +233,6 @@ void handle_http_get_request(int desc_idx)
     send(tcp_sock_descriptors[desc_idx], res_msg, strlen(res_msg), 0);
 
     // Creaiamo il response body con i dati presi dal database
-    list_all_clients_from_db();
 
     pthread_mutex_lock(&client_lock);
     close(tcp_sock_descriptors[desc_idx]);
@@ -238,8 +248,8 @@ void handle_http_get_request(int desc_idx)
 int insert_client_into_db(struct sockaddr_in tcp_addr, char *nickname,  uint16_t udp_port)
 {
     sqlite3_stmt *stmt;
-    char *query = "INSERT INTO clients (IP, TCP_PORT, UDP_PORT, NICKNAME)" \
-                  "VALUES (?1, ?2, ?3, ?4)";
+    char *query = "INSERT INTO clients (IP, TCP_PORT, UDP_PORT, NICKNAME, UPDATED_AT)" \
+                  "VALUES (?1, ?2, ?3, ?4, strftime('%s','now'))";
     sqlite3_prepare_v2(db_desc, query, -1, &stmt, NULL);
     sqlite3_bind_text(stmt, 1, inet_ntoa(tcp_addr.sin_addr), -1, SQLITE_STATIC);
     sqlite3_bind_int(stmt, 2, ntohs(tcp_addr.sin_port));
@@ -254,8 +264,6 @@ int insert_client_into_db(struct sockaddr_in tcp_addr, char *nickname,  uint16_t
 
     int record_id = (int)sqlite3_last_insert_rowid(db_desc);
 
-    printf("INSERT RECORD ID %d\n", record_id);
-
     sqlite3_finalize(stmt);
     return record_id;
 }
@@ -263,7 +271,7 @@ int insert_client_into_db(struct sockaddr_in tcp_addr, char *nickname,  uint16_t
 void update_client_db_info(int player_id, int opponent_id)
 {
     sqlite3_stmt *stmt;
-    char *query = "UPDATE clients SET OPPONENT_ID = ?1 WHERE ID = ?2";
+    char *query = "UPDATE clients SET OPPONENT_ID = ?1, UPDATED_AT = strftime('%s','now') WHERE ID = ?2";
     sqlite3_prepare_v2(db_desc, query, -1, &stmt, NULL);
     sqlite3_bind_int(stmt, 1, opponent_id);
     sqlite3_bind_int(stmt, 2, player_id);
@@ -277,21 +285,33 @@ void update_client_db_info(int player_id, int opponent_id)
     sqlite3_finalize(stmt);
 }
 
-void list_all_clients_from_db()
+void list_all_clients_from_db(char *buffer)
 {
     int ret_code;
     sqlite3_stmt *stmt;
     char *query = "SELECT " \
-                  " one.ID, one.NICKNAME, one.TCP_PORT, one.UDP_PORT, " \
-                  " two.NICKNAME, two.TCP_PORT, two.UDP_PORT " \
+                  " one.NICKNAME, one.IP, one.TCP_PORT, one.UDP_PORT, " \
+                  " two.NICKNAME, two.IP, two.TCP_PORT, two.UDP_PORT, datetime(two.UPDATED_AT,'unixepoch') AS UPDATED_AT" \
                   " FROM clients as one " \
                   " INNER JOIN clients as two " \
-                  " ON one.ID = two.OPPONENT_ID";
+                  " ON one.ID = two.OPPONENT_ID" \
+                  " ORDER BY UPDATED_AT DESC";
+
     sqlite3_prepare_v2(db_desc, query, -1, &stmt, NULL);
 
     while ((ret_code = sqlite3_step(stmt)) == SQLITE_ROW) 
     {
-        printf("%s vs %s\n", sqlite3_column_text(stmt, 2), sqlite3_column_text(stmt, 5));
+        sprintf(&buffer[strlen(buffer)], "<tr>");
+        sprintf(&buffer[strlen(buffer)], "<td>%s</td>", sqlite3_column_text(stmt, 0));
+        sprintf(&buffer[strlen(buffer)], "<td>%s</td>", sqlite3_column_text(stmt, 1));
+        sprintf(&buffer[strlen(buffer)], "<td>%d</td>", sqlite3_column_int(stmt, 2));
+        sprintf(&buffer[strlen(buffer)], "<td>%d</td>", sqlite3_column_int(stmt, 3));
+        sprintf(&buffer[strlen(buffer)], "<td>%s</td>", sqlite3_column_text(stmt, 4));
+        sprintf(&buffer[strlen(buffer)], "<td>%s</td>", sqlite3_column_text(stmt, 5));
+        sprintf(&buffer[strlen(buffer)], "<td>%d</td>", sqlite3_column_int(stmt, 6));
+        sprintf(&buffer[strlen(buffer)], "<td>%d</td>", sqlite3_column_int(stmt, 7));
+        sprintf(&buffer[strlen(buffer)], "<td>%s</td>", sqlite3_column_text(stmt, 8));
+        sprintf(&buffer[strlen(buffer)], "</tr>");
     }
 
     sqlite3_finalize(stmt);

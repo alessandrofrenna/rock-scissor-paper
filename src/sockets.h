@@ -10,11 +10,11 @@
 #include <netinet/udp.h>
 
 #define TCP_PORT 3000
-#define TCP_REQ_LEN 12
+#define TCP_REQ_LEN 1024
 #define TCP_RES_LEN 16
 #define NICKNAME_LEN 10
 #define HTTP_HEADER_LEN 512
-#define HTTP_MESSAGE_LEN 8192
+#define HTTP_MESSAGE_LEN 65535
 
 typedef struct tcp_req_t
 {
