@@ -1,19 +1,16 @@
 #include <inttypes.h>
-#include <pthread.h>
 #include <sqlite3.h>
 #include "queue.h"
 #include "sockets.h"
 
 #define MAX_CONCURRENT_PLAYERS 1024
 
-// Variabili globalix
+// Variabili globali
 sqlite3 *db_desc;
-unsigned int clients_count = 0;
 queue *players_queue = NULL;
 int tcp_sock_descriptors[MAX_CONCURRENT_PLAYERS];
 struct sockaddr_in tcp_sock_addresses[MAX_CONCURRENT_PLAYERS];
 pthread_mutex_t client_lock = PTHREAD_MUTEX_INITIALIZER;
-pthread_mutex_t clients_count_lock = PTHREAD_MUTEX_INITIALIZER;
 
 // Prototipi delle funzioni del server
 void *handle_client_requests(void *);
@@ -53,53 +50,45 @@ int main()
     // Loop principale che accetta connessioni
     while (1)
     {
-        if (clients_count < MAX_CONCURRENT_PLAYERS)
+        // Accettiamo la connessione TCP fatta da un client
+        // Acquisiamo il lock per settare il client connesso
+        pthread_mutex_lock(&client_lock);
+        int addr_len = sizeof(tcp_sock_addresses[client_idx]);
+        tcp_sock_descriptors[client_idx] = accept(
+            server_descriptor,
+            (struct sockaddr *)&tcp_sock_addresses[client_idx],
+            &addr_len
+        );
+        pthread_mutex_unlock(&client_lock);
+
+        if (tcp_sock_descriptors[client_idx] < 0)
         {
-            // Se siamo arrivati all'ultimo indice valido, azzeriamo client_idx
-            if (client_idx >= MAX_CONCURRENT_PLAYERS)
-            {
-                client_idx = 0;
-            }
+            perror("TCP server - error accepting client connection");
+            fflush(stderr);
+        }
 
-            // Accettiamo la connessione TCP fatta da un client
-            // Acquisiamo il lock per settare il client connesso
-            pthread_mutex_lock(&client_lock);
-            int addr_len = sizeof(tcp_sock_addresses[client_idx]);
-            tcp_sock_descriptors[client_idx] = accept(
-                server_descriptor,
-                (struct sockaddr *)&tcp_sock_addresses[client_idx],
-                &addr_len
-            );
-            pthread_mutex_unlock(&client_lock);
+        printf(
+            "TCP server: client connected from %s:%d\n",
+            inet_ntoa(tcp_sock_addresses[client_idx].sin_addr),
+            ntohs(tcp_sock_addresses[client_idx].sin_port)
+        );
 
-            if (tcp_sock_descriptors[client_idx] < 0)
-            {
-                perror("TCP server - error accepting client connection");
-                fflush(stderr);
-            }
+        // Creiamo un oggetto di tipo player info da far usare al thread
+        player_info player;
+        player.descr_index = client_idx;
+        player.ip_addr = tcp_sock_addresses[client_idx].sin_addr.s_addr;
 
-            printf(
-                "TCP server: client connected from %s:%d\n",
-                inet_ntoa(tcp_sock_addresses[client_idx].sin_addr),
-                ntohs(tcp_sock_addresses[client_idx].sin_port)
-            );
-
-            // Creiamo un oggetto di tipo player info da far usare al thread
-            player_info player;
-            player.descr_index = client_idx;
-            player.ip_addr = tcp_sock_addresses[client_idx].sin_addr.s_addr;
-
-            // Creiamo un thread detached che gestirà le richieste del client
-            pthread_t thread;
-            pthread_create(&thread, NULL, handle_client_requests, &player);
-            pthread_detach(thread);
-            
-            // Acquisiamo il lock ed incrementiamo il conto dei client connessi
-            pthread_mutex_lock(&clients_count_lock);
-            clients_count++;
-            pthread_mutex_unlock(&clients_count_lock);
-            
-            client_idx++;
+        // Creiamo un thread detached che gestirà le richieste del client
+        pthread_t thread;
+        pthread_create(&thread, NULL, handle_client_requests, &player);
+        pthread_detach(thread);
+        
+        client_idx++;
+        
+        // Se siamo arrivati all'ultimo indice valido, azzeriamo client_idx
+        if (client_idx >= MAX_CONCURRENT_PLAYERS)
+        {
+            client_idx = 0;
         }
     }
 
@@ -135,13 +124,7 @@ void *handle_client_requests(void *ptr)
         player.db_index = insert_client_into_db(tcp_sock_addresses[player.descr_index], player.nickname, player.udp_port);
 
         // Accesso concorrente alla coda per salvare i dati del giocatore che aspetta
-        pthread_mutex_lock(&players_queue->lock);
         enqueue(players_queue, player);
-        if (clients_count > 0 && clients_count % 2 == 0)
-        {
-            pthread_cond_signal(&players_queue->are_even);
-        }
-        pthread_mutex_unlock(&players_queue->lock);
     }
 
     pthread_exit(NULL);
@@ -151,17 +134,11 @@ void *ready_players_handler(void *ptr)
 {
     while (1)
     {
-        pthread_mutex_lock(&players_queue->lock);
-
-        if (clients_count <= 0 || clients_count % 2 != 0)
-        {
-            pthread_cond_wait(&players_queue->are_even, &players_queue->lock);
-        }
-
         tcp_server_response p1_res, p2_res;
         player_info p1 = dequeue(players_queue)->value;
         player_info p2 = dequeue(players_queue)->value;
 
+        pthread_t sender_t;
         // Popoliamo l'oggetto relativo alla risposta che verrà mandata a giocatore #1
         p1_res.ip_address = htonl(p2.ip_addr);
         p1_res.udp_port = htons(p2.udp_port);
@@ -184,13 +161,6 @@ void *ready_players_handler(void *ptr)
         close(tcp_sock_descriptors[p1.descr_index]);
         close(tcp_sock_descriptors[p2.descr_index]);
         pthread_mutex_unlock(&client_lock);
-
-        pthread_mutex_lock(&clients_count_lock);
-        clients_count -= 2;
-        pthread_mutex_unlock(&clients_count_lock);
-
-        // Rilasciamo il lock del mutex
-        pthread_mutex_unlock(&players_queue->lock);
     }
 }
 
@@ -221,6 +191,7 @@ void handle_http_get_request(int desc_idx)
         "<th>Player nickname</th><th>Player IP address</th><th>Player TCP port</th><th>Player UDP port</th>"\
         "<th>Opponent nickname</th><th>Opponent IP address</th><th>Opponent TCP port</th><th>Opponent UDP port</th><th>Updated at</th></tr></thead><tbody>"
     );
+    // Creaiamo il response body con i dati presi dal database
     list_all_clients_from_db(res_msg);
     sprintf(&res_msg[strlen(res_msg)], "</tbody></table></div></div></body></html>");
 
@@ -232,17 +203,9 @@ void handle_http_get_request(int desc_idx)
     send(tcp_sock_descriptors[desc_idx], res_head, strlen(res_head), 0);
     send(tcp_sock_descriptors[desc_idx], res_msg, strlen(res_msg), 0);
 
-    // Creaiamo il response body con i dati presi dal database
-
     pthread_mutex_lock(&client_lock);
     close(tcp_sock_descriptors[desc_idx]);
     pthread_mutex_unlock(&client_lock);
-
-    pthread_mutex_lock(&clients_count_lock);
-    clients_count--;
-    pthread_mutex_unlock(&clients_count_lock);
-
-    pthread_exit(NULL);
 }
 
 int insert_client_into_db(struct sockaddr_in tcp_addr, char *nickname,  uint16_t udp_port)
